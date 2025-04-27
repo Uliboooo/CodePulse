@@ -1,0 +1,8 @@
+[package]
+name = "potato_issue_tracker"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+local_issues_lib = "0.3.2"
+clap = { version = "4.5.37", features = ["derive"] }
