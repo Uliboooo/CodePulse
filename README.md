@@ -1,5 +1,7 @@
 # CodePulse
 
+**STILL in BETA**
+
 ## command map
 
 Planned for v1.
