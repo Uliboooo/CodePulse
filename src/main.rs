@@ -1,180 +1,207 @@
-use clap::{Parser, Subcommand};
-use local_issues_lib::{self, Project};
-use std::{env, fmt::Display, io, path::PathBuf};
+use chrono::Local;
+use clap::{Args, Parser, Subcommand, command};
+use local_issues_lib::{self, DbProject, Project};
+use std::{
+    env,
+    fmt::Display,
+    io,
+    path::{Path, PathBuf},
+};
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug)]
 enum Error {
-    LocalIssueError(local_issues_lib::Error),
-    IoError(io::Error),
-    NotInitialized,
-    NeedId,
+    LocalIssue(local_issues_lib::Error),
+    Io(io::Error),
 }
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::LocalIssueError(e) => write!(f, "lib error: {}", e),
-            Error::IoError(e) => write!(f, "{}", e),
-            Error::NotInitialized => write!(f, "not initialized"),
-            Error::NeedId => write!(f, "Need ID"),
+            Error::LocalIssue(error) => write!(f, "{:?}", error),
+            Error::Io(error) => write!(f, "{}", error),
+            // Error::NotFound(e) => write!(f, "not found: {}", e),
+            // Error::PathNotFound(_) => write!(f, "path not found"),
+        }
+    }
+}
+
+impl Error {
+    fn is_file_zero(&self) -> bool {
+        match self {
+            Error::LocalIssue(local_issues_lib::Error::DbError(error)) => error.is_file_is_zero(),
+            _ => false,
         }
     }
 }
 
 #[derive(Debug, Parser)]
-struct Args {
+#[command(propagate_version = true)]
+#[command(name = "cpls", version = VERSION)]
+struct Cli {
     #[command(subcommand)]
     subcommand: Commands,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// initialized potato issues tracker in /folder_path
-    #[clap(arg_required_else_help = true)]
+    /// initialize dir (or -p path folder)
     Init(Init),
-
+    /// create new issue
+    Create(Create),
+    /// close issue
+    Delete(Delete),
+    /// show list;  issues and comments in issues
     List(List),
-
-    /// control issues
-    Issue(Issue),
-
-    /// commit message or other ctrl
-    Commit(Commit),
+    /// add comment to issue by issue num; get by `list`command
+    Comment(Comment),
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Args)]
 struct Init {
-    // /// project title, when is empty, set folder name.
-    // title: Option<String>,
-    /// target dir path. when it's empty, set current dir.
-    dir: Option<String>,
+    name: Option<String>,
+
+    #[arg(short = 'p', long = "path")]
+    path: Option<String>,
 }
 
-/// show list: issues or commit messages
-#[derive(Debug, Parser)]
-struct List {
-    /// show commit messages list.
-    #[arg(short = 'c', long = "cmtmsg")]
-    is_cmtmsg: bool,
-
-    /// when show commit messages, need to choose which issue by id.
-    /// require `--cmtmsg`
-    #[arg(short = 'i', long = "id", requires = "is_cmtmsg")]
-    issue_id: Option<u64>,
-
-    /// show all(include closed contents)
-    #[arg(long = "all")]
-    all: bool,
-
-    /// show list as oneline
-    #[arg(long = "oneline")]
-    oneline: bool,
+#[derive(Debug, Args)]
+struct Create {
+    name: String,
 }
 
-#[derive(Debug, Parser)]
-struct Issue {
-    /// target id for tags, etc...
-    target_id: Option<u64>,
+#[derive(Debug, Args)]
+struct Delete {
+    issue_num: u64,
 
-    /// new issue
-    #[arg(short = 'n', long = "new")]
-    new_issue_name: Option<String>,
-
-    /// add tags to issue_name. requires TARGET_ID. split tags by `,`
-    #[arg(
-        short = 't',
-        long = "tags",
-        requires = "target_id",
-        value_delimiter = ','
-    )]
-    tags: Option<Vec<String>>,
-
-    /// delete issue by id, requires TARGET_ID
-    #[arg(short = 'd', long = "delete", requires = "target_id")]
-    delete: bool,
+    #[arg(short = 'u', long = "unresolved")]
+    unresolved: bool,
 }
 
-#[derive(Debug, Parser)]
-struct Commit {
-    /// commit message by issue_id
-    #[arg(short = 'm', long = "message", requires = "issue_id")]
-    message: Option<String>,
+#[derive(Debug, Args)]
+struct List {}
 
-    /// delete by id
-    #[arg(short = 'd', long = "delete", requires = "issue_id")]
-    delete: bool,
-
-    /// target id for tags, etc...
-    issue_id: Option<u64>,
+#[derive(Debug, Args)]
+struct Comment {
+    issue_num: u64,
+    comment: String,
 }
 
-fn work_path() -> PathBuf {
-    env::current_dir().unwrap()
-}
-
-fn folder_name() -> String {
-    env::current_dir()
-        .unwrap()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
+/// return dir name
+fn project_name<T: AsRef<str>>(dir: &Path, def: T) -> String {
+    dir.file_stem()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or(def.as_ref().to_string())
+        .trim()
         .to_string()
 }
 
-fn main() -> Result<(), Error> {
-    let cli = Args::parse();
+/// if failed to get current dir name, use datetime as project name
+fn init_f(work_path: PathBuf, init: Init) -> Result<(), Error> {
+    let title = init
+        .name
+        .unwrap_or(project_name(&work_path, Local::now().to_rfc2822()));
 
-    let db = Project::open(folder_name(), work_path()).ok();
-
-    match cli.subcommand {
-        Commands::Init(init) => {
-            if db.is_some() {
-                println!("this folder is initialized.");
-                return Ok(());
-            }
-            let title = folder_name();
-            let path = match init.dir {
-                Some(v) => PathBuf::from(v),
-                None => env::current_dir().unwrap(),
-            };
-            let _a = Project::open(title, &path).map_err(Error::LocalIssueError)?;
-
-            println!(
-                "initialized potato issues tracker in {}",
-                path.to_str().unwrap()
-            );
+    // if init path (-p) exists, bound it, otherwise bound work_path
+    let work_path = match init.path {
+        Some(arg_path) => {
+            let p = PathBuf::from(arg_path);
+            if p.exists() { p } else { work_path }
         }
-        Commands::List(list) => match db {
-            Some(db) => {
-                if list.is_cmtmsg {
-                    let issue_id = match list.issue_id {
-                        Some(id) => id,
-                        None => return Err(Error::NeedId),
-                    };
-                    let _list = db.get_opened_issue_id();
-                } else if list.oneline {
-                    println!("{}", db.oneline_fmt());
-                } else if list.all {
-                    println!("{}", db);
-                } else {
-                    println!("{}", db.filterd_string(db.get_opened_issue_id().unwrap()));
-                }
+        None => work_path,
+    };
+
+    if cfg!(test) {
+        println!("{:?}", work_path);
+    }
+
+    // if loaded file is empty bound empty Project struct.
+    Project::open(&work_path)
+        .or_else(|e| {
+            if e.is_file_is_zero() {
+                Ok(Project::new(title, &work_path))
+            } else {
+                Err(e)
             }
-            None => {
-                return Err(Error::NotInitialized);
-            }
-        },
-        Commands::Issue(issue) => todo!(),
-        Commands::Commit(commit) => todo!(),
+        })
+        .map(|_| ())
+        .map_err(Error::LocalIssue)
+}
+
+fn main() -> Result<(), Error> {
+    let current_dir = env::current_dir().map_err(Error::Io)?;
+    let work_path = if cfg!(test) || cfg!(debug_assertions) {
+        current_dir.join("tests").join("test")
+    } else {
+        current_dir
+    };
+
+    if cfg!(test) || cfg!(debug_assertions) {
+        println!("{:?}", work_path);
+    }
+
+    let cli = Cli::parse();
+
+    println!("{:?}", cli);
+    let result = match cli.subcommand {
+        Commands::Init(init) => init_f(work_path, init),
+        Commands::Create(create) => {
+            let mut db = Project::open(&work_path).map_err(Error::LocalIssue)?;
+            let issue_name = create.name;
+            db.add_issue(issue_name);
+            db.save().map_err(Error::LocalIssue)
+        }
+        Commands::Delete(delete) => {
+            let mut db = Project::open(&work_path).map_err(Error::LocalIssue)?;
+
+            //                                                maybe unresolved flag isn't much use
+            db.to_close_issue(delete.issue_num, !delete.unresolved);
+            db.save().map_err(Error::LocalIssue)
+        }
+        Commands::List(_list) => {
+            let db = Project::open(&work_path).map_err(Error::LocalIssue)?;
+            println!("{}", db);
+            Ok(())
+        }
+        Commands::Comment(comment) => {
+            let mut db = Project::open(&work_path).map_err(Error::LocalIssue)?;
+            // let id = comment.issue_num;
+            db.commit(comment.issue_num, comment.comment);
+            db.save().map_err(Error::LocalIssue)
+        }
+    };
+
+    match result {
+        Ok(_) => {
+            println!("success");
+        }
+        Err(e) => {
+            println!("error: {}", e);
+        }
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::folder_name;
+    use crate::{Error, Init, init_f};
+    use std::env;
 
     #[test]
-    fn name_test() {
-        println!("{}", folder_name());
+    fn test_init() -> Result<(), Error> {
+        let mut work_path = env::current_dir().map_err(Error::Io)?;
+        work_path.push("tests");
+        work_path.push("test");
+
+        let ini = Init {
+            name: Some("test".to_string()),
+            path: None,
+        };
+
+        let a = init_f(work_path, ini);
+        println!("{:?}", a);
+        Ok(())
     }
+    
+    
 }
